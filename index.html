@@ -160,6 +160,7 @@ var cameraInstance = null;
 var itemFormFromScan = false;
 var editingInFlow = false;
 var stockSearchQuery = "";
+var pendingRestore = null;
 
 /* ============ helpers ============ */
 function nowStamp() {
@@ -209,35 +210,68 @@ function icon(name, size, color, strokeWidth) {
 
 /* ============ persistence ============ */
 function loadData() {
-  if (!window.storage) {
-    state.items = SEED_ITEMS.map(function (i) { return Object.assign({}, i); });
-    state.storageAvailable = false;
-    state.dataLoaded = true;
-    render();
-    return;
-  }
   var loadedItems = SEED_ITEMS.map(function (i) { return Object.assign({}, i); });
   var loadedTx = [];
-  var p1 = window.storage.get("shelftrue:items", false).then(function (r) {
-    if (r && r.value) { try { loadedItems = JSON.parse(r.value); } catch (e) {} }
-  }).catch(function () {});
-  var p2 = window.storage.get("shelftrue:transactions", false).then(function (r) {
-    if (r && r.value) { try { loadedTx = JSON.parse(r.value); } catch (e) {} }
-  }).catch(function () {});
-  Promise.all([p1, p2]).then(function () {
-    state.items = loadedItems;
-    state.transactions = loadedTx;
-    state.dataLoaded = true;
-    render();
-  });
+  var storageOk = true;
+  try {
+    var savedItems = localStorage.getItem("shelftrue:items");
+    if (savedItems) loadedItems = JSON.parse(savedItems);
+    var savedTx = localStorage.getItem("shelftrue:transactions");
+    if (savedTx) loadedTx = JSON.parse(savedTx);
+  } catch (e) {
+    storageOk = false;
+  }
+  state.items = loadedItems;
+  state.transactions = loadedTx;
+  state.storageAvailable = storageOk;
+  state.dataLoaded = true;
+  render();
 }
 function persistItems() {
-  if (!state.dataLoaded || !state.storageAvailable) return;
-  window.storage.set("shelftrue:items", JSON.stringify(state.items), false).catch(function () {});
+  if (!state.dataLoaded) return;
+  try { localStorage.setItem("shelftrue:items", JSON.stringify(state.items)); } catch (e) { state.storageAvailable = false; }
 }
 function persistTx() {
-  if (!state.dataLoaded || !state.storageAvailable) return;
-  window.storage.set("shelftrue:transactions", JSON.stringify(state.transactions), false).catch(function () {});
+  if (!state.dataLoaded) return;
+  try { localStorage.setItem("shelftrue:transactions", JSON.stringify(state.transactions)); } catch (e) { state.storageAvailable = false; }
+}
+function exportBackup() {
+  try {
+    var payload = { exportedAt: new Date().toISOString(), items: state.items, transactions: state.transactions };
+    var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    var dateStr = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = "shelftrue-backup-" + dateStr + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    showFlash({ type: "ok", text: "Backup downloaded" });
+  } catch (e) {
+    showFlash({ type: "error", text: "Couldn't create the backup file" });
+  }
+  render();
+}
+function handleRestoreFile(file) {
+  var reader = new FileReader();
+  reader.onload = function (e) {
+    try {
+      var data = JSON.parse(e.target.result);
+      if (!data || !Array.isArray(data.items)) throw new Error("bad format");
+      pendingRestore = data;
+      render();
+    } catch (err) {
+      showFlash({ type: "error", text: "That doesn't look like a valid ShelfTrue backup file" });
+      render();
+    }
+  };
+  reader.onerror = function () {
+    showFlash({ type: "error", text: "Couldn't read that file" });
+    render();
+  };
+  reader.readAsText(file);
 }
 
 /* ============ business logic ============ */
@@ -561,6 +595,20 @@ function renderManageModal() {
           '<div><div class="manage-name">' + esc(i.name) + '</div><div class="manage-meta">' + esc(i.barcode) + " · " + esc(i.bin) + "</div></div>" +
           icon("pencil", 14, "var(--text-faint)") + "</button>";
       }).join("");
+  var restoreBlock = "";
+  if (pendingRestore) {
+    var itemCount = Array.isArray(pendingRestore.items) ? pendingRestore.items.length : 0;
+    var txCount = Array.isArray(pendingRestore.transactions) ? pendingRestore.transactions.length : 0;
+    var when = pendingRestore.exportedAt ? new Date(pendingRestore.exportedAt).toLocaleString() : "unknown date";
+    restoreBlock =
+      '<div style="background:var(--red-dim);border:1px solid var(--red);border-radius:8px;padding:12px;margin-top:10px;font-size:12.5px;color:var(--text);">' +
+        '<div style="margin-bottom:8px;">Import backup from ' + esc(when) + "? This replaces your current " + itemCount + " item(s) and " + txCount + " log entries — can't be undone.</div>" +
+        '<div style="display:flex;gap:8px;">' +
+          '<button class="btn-ghost" data-action="cancel-restore">Cancel</button>' +
+          '<button class="btn-danger" style="flex:2;justify-content:center;" data-action="confirm-restore">Import backup</button>' +
+        "</div>" +
+      "</div>";
+  }
   return (
     '<div class="overlay"><div class="modal-card">' +
       '<div class="modal-header"><span class="modal-title">Manage items</span>' +
@@ -571,6 +619,12 @@ function renderManageModal() {
         '<button class="btn-ghost" data-action="reset-demo">' + (manageConfirmReset ? "Tap again to confirm" : "Restore demo items") + "</button>" +
         '<button class="btn-danger-ghost" data-action="clear-all">' + (manageConfirmClear ? "Tap again to confirm" : "Clear all items") + "</button>" +
       "</div>" +
+      '<div class="manage-actions">' +
+        '<button class="btn-ghost" data-action="export-backup">' + icon("arrowDown", 14) + " Export backup</button>" +
+        '<button class="btn-ghost" data-action="restore-backup-pick">' + icon("arrowUp", 14) + " Restore backup</button>" +
+      "</div>" +
+      restoreBlock +
+      '<input type="file" id="restore-file-input" accept="application/json,.json" style="display:none;"/>' +
     "</div></div>"
   );
 }
@@ -635,7 +689,7 @@ function bindEvents() {
     else if (action === "pick-bin-item") { state.selectedItem = state.items.find(function (i) { return i.id === el.dataset.id; }) || null; render(); }
     else if (action === "commit-count") { commitCount(); }
     else if (action === "open-manage") { state.manageOpen = true; render(); }
-    else if (action === "close-manage") { state.manageOpen = false; manageConfirmClear = false; manageConfirmReset = false; render(); }
+    else if (action === "close-manage") { state.manageOpen = false; manageConfirmClear = false; manageConfirmReset = false; pendingRestore = null; render(); }
     else if (action === "manage-add-new") { state.itemForm = {}; itemFormFromScan = false; editingInFlow = false; render(); }
     else if (action === "manage-edit-item") { state.itemForm = state.items.find(function (i) { return i.id === el.dataset.id; }) || {}; itemFormFromScan = false; editingInFlow = false; render(); }
     else if (action === "reset-demo") {
@@ -645,6 +699,23 @@ function bindEvents() {
     else if (action === "clear-all") {
       if (manageConfirmClear) { state.items = []; persistItems(); manageConfirmClear = false; render(); }
       else { manageConfirmClear = true; render(); setTimeout(function () { manageConfirmClear = false; render(); }, 4000); }
+    }
+    else if (action === "export-backup") { exportBackup(); }
+    else if (action === "restore-backup-pick") {
+      var fileInput = document.getElementById("restore-file-input");
+      if (fileInput) fileInput.click();
+    }
+    else if (action === "cancel-restore") { pendingRestore = null; render(); }
+    else if (action === "confirm-restore") {
+      if (pendingRestore) {
+        state.items = Array.isArray(pendingRestore.items) ? pendingRestore.items : [];
+        state.transactions = Array.isArray(pendingRestore.transactions) ? pendingRestore.transactions : [];
+        persistItems();
+        persistTx();
+        pendingRestore = null;
+        showFlash({ type: "ok", text: "Backup restored" });
+      }
+      render();
     }
     else if (action === "item-form-cancel") { state.itemForm = null; itemFormFromScan = false; editingInFlow = false; render(); }
     else if (action === "clear-stock-search") { stockSearchQuery = ""; render(); }
@@ -715,6 +786,15 @@ function bindEvents() {
         searchEl.style.paddingRight = "10px";
         existingBtn.remove();
       }
+    };
+  }
+
+  var restoreInput = document.getElementById("restore-file-input");
+  if (restoreInput) {
+    restoreInput.onchange = function (e) {
+      var file = e.target.files && e.target.files[0];
+      if (file) handleRestoreFile(file);
+      e.target.value = "";
     };
   }
 }
