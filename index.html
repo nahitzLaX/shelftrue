@@ -157,6 +157,7 @@ var manageConfirmClear = false;
 var manageConfirmReset = false;
 var flashTimer = null;
 var cameraInstance = null;
+var cameraTarget = null;
 var itemFormFromScan = false;
 var editingInFlow = false;
 var stockSearchQuery = "";
@@ -175,6 +176,9 @@ function esc(s) {
 }
 function findByBarcode(code) {
   return state.items.find(function (i) { return i.barcode === code.trim(); });
+}
+function displayBarcode(b) {
+  return (b && b.indexOf("NOBARCODE-") === 0) ? "No barcode" : b;
 }
 function showFlash(f) {
   state.flash = f;
@@ -329,6 +333,13 @@ function tryUpcLookup(barcode) {
 }
 function handleCameraDetected(code) {
   state.cameraOpen = false;
+  if (cameraTarget === "form-barcode") {
+    cameraTarget = null;
+    render();
+    var barcodeEl = document.getElementById("field-barcode");
+    if (barcodeEl) barcodeEl.value = code;
+    return;
+  }
   render();
   resolveScannedCode(code);
 }
@@ -560,7 +571,7 @@ function renderStockTable() {
     : list.map(function (i) {
         var low = i.qty <= i.reorder;
         return '<div class="table-row"><div><div class="stock-name">' + esc(i.name) + '</div>' +
-          '<div class="stock-meta"><span class="rack-tag">' + esc(i.bin) + '</span>' + (i.size ? '<span class="stock-barcode" style="border:1px solid var(--line);border-radius:3px;padding:1px 5px;">' + esc(i.size) + "</span>" : "") + '<span class="stock-barcode">' + esc(i.barcode) + "</span></div></div>" +
+          '<div class="stock-meta"><span class="rack-tag">' + esc(i.bin) + '</span>' + (i.size ? '<span class="stock-barcode" style="border:1px solid var(--line);border-radius:3px;padding:1px 5px;">' + esc(i.size) + "</span>" : "") + '<span class="stock-barcode">' + esc(displayBarcode(i.barcode)) + "</span></div></div>" +
           '<div class="stock-qty' + (low ? " low" : "") + '">' + i.qty + "</div></div>";
       }).join("");
   var title = "Current stock" + (q ? " · " + list.length + " match" + (list.length !== 1 ? "es" : "") : "");
@@ -592,7 +603,7 @@ function renderManageModal() {
     ? '<div class="empty-note" style="padding:18px 2px;">No items yet. Add your first real SKU below.</div>'
     : state.items.map(function (i) {
         return '<button class="manage-row" data-action="manage-edit-item" data-id="' + i.id + '">' +
-          '<div><div class="manage-name">' + esc(i.name) + '</div><div class="manage-meta">' + esc(i.barcode) + " · " + esc(i.bin) + "</div></div>" +
+          '<div><div class="manage-name">' + esc(i.name) + '</div><div class="manage-meta">' + esc(displayBarcode(i.barcode)) + " · " + esc(i.bin) + "</div></div>" +
           icon("pencil", 14, "var(--text-faint)") + "</button>";
       }).join("");
   var restoreBlock = "";
@@ -637,7 +648,12 @@ function renderItemFormModal() {
       '<div class="modal-header"><span class="modal-title">' + (isEdit ? "Edit item" : (itemFormFromScan ? "New barcode — add it" : "Add item")) + "</span>" +
         '<button class="icon-btn" data-action="item-form-cancel">' + icon("x", 18) + "</button></div>" +
       '<form id="item-form" style="display:flex;flex-direction:column;gap:10px;margin-top:14px;">' +
-        '<div class="form-field"><label class="form-label">Barcode</label><input id="field-barcode" class="form-input" value="' + esc(f.barcode || "") + '" placeholder="Scan or type it in"/></div>' +
+        '<div class="form-field"><label class="form-label">Barcode</label>' +
+          '<div style="display:flex;gap:6px;">' +
+            '<input id="field-barcode" class="form-input" style="flex:1;" value="' + esc(f.barcode || "") + '" placeholder="Optional — scan or type it in"/>' +
+            '<button type="button" class="icon-btn" data-action="scan-into-barcode-field" style="border:1px solid var(--line);border-radius:7px;padding:0 10px;">' + icon("camera", 16) + "</button>" +
+          "</div>" +
+        "</div>" +
         (itemFormFromScan && !isEdit ? '<div id="upc-lookup-status" style="font-size:11px;color:var(--text-faint);margin-top:-4px;">Looking up product…</div>' : "") +
         '<div class="form-field"><label class="form-label">Item name</label><input id="field-name" class="form-input" value="' + esc(f.name || "") + '" placeholder="Optional — fill in later if you want"/></div>' +
         '<div class="form-row3">' +
@@ -679,6 +695,7 @@ function bindEvents() {
     var action = el.dataset.action;
     if (action === "select-tab") { state.mode = el.dataset.mode; state.selectedItem = null; state.countBin = null; render(); }
     else if (action === "open-camera") { state.cameraOpen = true; render(); }
+    else if (action === "scan-into-barcode-field") { cameraTarget = "form-barcode"; state.cameraOpen = true; render(); }
     else if (action === "close-camera") { state.cameraOpen = false; render(); }
     else if (action === "clear-selected") { state.selectedItem = null; render(); }
     else if (action === "edit-item-inflow") { itemFormFromScan = false; editingInFlow = true; state.itemForm = state.selectedItem; render(); }
@@ -741,11 +758,12 @@ function bindEvents() {
       var size = document.getElementById("field-size").value.trim();
       var qty = parseInt(document.getElementById("field-qty").value, 10) || 0;
       var reorder = parseInt(document.getElementById("field-reorder").value, 10) || 0;
-      if (!barcode) return;
-      var finalName = name || ("Unnamed item " + barcode);
+      if (!barcode && !name) return;
+      var finalBarcode = barcode || ("NOBARCODE-" + newId().slice(0, 6).toUpperCase());
+      var finalName = name || ("Unnamed item " + finalBarcode);
       var finalBin = (bin || "UNSORTED").toUpperCase();
       var existingId = state.itemForm && state.itemForm.id;
-      var data = { id: existingId || newId(), barcode: barcode, name: finalName, bin: finalBin, size: size, qty: qty, reorder: reorder };
+      var data = { id: existingId || newId(), barcode: finalBarcode, name: finalName, bin: finalBin, size: size, qty: qty, reorder: reorder };
       var exists = state.items.some(function (i) { return i.id === data.id; });
       state.items = exists ? state.items.map(function (i) { return i.id === data.id ? data : i; }) : state.items.concat([data]);
       persistItems();
